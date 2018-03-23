@@ -39,7 +39,7 @@
     self.audioManager = [Novocaine audioManager];
     
 //    self.ringBuffer = new RingBuffer(64*512, 2);
-    self.ringBuffer = new RingBuffer(16*512, 2);
+    self.ringBuffer = new RingBuffer(128*512, 2);
     
     __weak AppDelegate * wself = self;
     
@@ -52,7 +52,9 @@
     
     DspAlgorithm myDspAlgorithm = fftIfft;
     
+    // --------------------------------------------------------------- //
     // ------------------ BASIC THROUGHPUT --------------------------- //
+    // --------------------------------------------------------------- //
     if (myDspAlgorithm == basic) {
         // Basic playthru example
         [self.audioManager setInputBlock:^(float *data,
@@ -70,7 +72,10 @@
         }];
     }
     
+    // --------------------------------------------------------------- //
     // ------------------ SLAPBACK DELAY ----------------------------- //
+    // --------------------------------------------------------------- //
+    
     if (myDspAlgorithm == delay) {
         
         // A simple delay that's hard to express without ring buffers
@@ -90,14 +95,7 @@
         [self.audioManager setOutputBlock:^(float *outData, UInt32 numFrames, UInt32 numChannels) {
             
             // would like to know how separated these heads actually are
-            /*
-             with numFrames at 512 and mSizeOfBuffer at 16*512, write index is
-             consistently 5120 samples ahead of read index, so it's
-             10 i/o buffer lengths (512) ahead, which is how much wiggle room
-             we have to do our DSP
-            */
-//            wself.ringBuffer->SeekWriteHeadPosition(0.0);
-//            wself.ringBuffer->SeekReadHeadPosition(0.0);
+            // put a printf in call to add new data and print mNumUnreadFrames[0] with %lld
             
             /*
             step 1: grab a block of 512 samples starting from current idx in ring buffer.
@@ -144,7 +142,11 @@
             
         }];
     }
+    
+    // --------------------------------------------------------------- //
     // ------------------ FFT TO IFFT -------------------------------- //
+    // --------------------------------------------------------------- //
+    
     if (myDspAlgorithm == fftIfft) {
         
         [self.audioManager setInputBlock:^(float *data,
@@ -155,25 +157,66 @@
             wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
         }];
         
-        // two FFT block
-        float *holdingBuffer = (float *)calloc(2*numFrames, sizeof(float));
+        int N = 512;
+        int log2n = 9;    // 2^9 = 512
         
-        // setup the twiddle factor stuff...
+        DSPSplitComplex zSplit;
+        zSplit.realp = new float[N/2];
+        zSplit.imagp = new float[N/2];
+        
+        float* mag;
+        float* phase;
+        mag = new float[N/2];
+        phase = new float[N/2];
+        
+        
+        // prepare the fft algo (you want to reuse the setup across fft calculations)
+        FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
         
         [self.audioManager setOutputBlock:^(float *outData,
                                             UInt32 numFrames,
                                             UInt32 numChannels) {
             
             
-            // get 1024 time samples
-            wself.ringBuffer->FetchInterleavedData(holdingBuffer, 2*numFrames, numChannels);
-            
-            // FFT the 1024 time samples
-            
-            // IFFT and scale the FFT-ed samples
-            
-            // ready for playback
+            // copy the data to the packed complex array that the fft algo uses
             wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
+            
+            for (int iChannel = 0; iChannel<numChannels; iChannel++){
+                
+                // get it into packed format for fft
+                vDSP_ctoz((DSPComplex *) (outData + iChannel), 2, &zSplit, 1, N/2);
+                
+                // calculate the fft
+                vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_FORWARD);
+                
+                
+                
+                for(int i=0; i<N/2; i++){
+                    mag[i] = sqrtf(zSplit.realp[i]*zSplit.realp[i] + zSplit.imagp[i]*zSplit.imagp[i]);
+                    phase[i] = atan2f(zSplit.imagp[i], zSplit.realp[i]);
+                }
+                
+                
+                float* zReal = zSplit.realp;
+                float* zImag = zSplit.imagp;
+                
+                for(int i=0; i<N/2; i++){
+                    *zReal++ = mag[i]*cosf(phase[i]);
+                    *zImag++ = mag[i]*sinf(phase[i]);
+                }
+                
+                
+                // calculate the ifft. leaves it in packed format.
+                vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_INVERSE);
+                
+                // unpack it into a real vector
+                vDSP_ztoc(&zSplit, 1, (DSPComplex *) (outData + iChannel), 2, N/2);
+                
+                // scale the result
+                float scale = 0.5/N;
+                vDSP_vsmul(outData + iChannel, 1, &scale, outData + iChannel, 1, N);
+            }
+            
         }];
         
     }

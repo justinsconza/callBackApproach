@@ -67,6 +67,7 @@ void RingBuffer::UpdateFrameCount(SInt64 numFrames, SInt64 channel)
     if (unreadFrames >= mSizeOfBuffer) unreadFrames = mSizeOfBuffer;
     
     atomic_set(&mNumUnreadFrames[channel], unreadFrames);
+    
 }
 
 void RingBuffer::AddNewSInt16AudioBuffer(const AudioBuffer aBuffer)
@@ -223,7 +224,7 @@ void RingBuffer::FetchData(float *outData, SInt64 numFrames, SInt64 whichChannel
         toAdd = -numFrames;
     else
         toAdd = -mNumUnreadFrames[whichChannel];
-    
+        
     OSAtomicAdd64(toAdd, &mNumUnreadFrames[whichChannel]);
 
 }
