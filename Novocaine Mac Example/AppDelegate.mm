@@ -157,41 +157,45 @@
             wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
         }];
         
-        int N = 1024;
-        int log2n = 10;    // 2^9 = 512
+        int N = 512;
+        int log2n = 9;    // 2^9 = 512
         
         DSPSplitComplex zSplit;
         zSplit.realp = new float[N/2];
         zSplit.imagp = new float[N/2];
-        
+
         float* mag;
         float* phase;
         mag = new float[N/2];
         phase = new float[N/2];
         
-    
         float* myWindow;
         myWindow = new float[N];
         vDSP_hann_window(myWindow, N, vDSP_HANN_DENORM);
         
-
-        // prepare the fft algo (you want to reuse the setup across fft calculations)
         FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
-    
+        
+        // FFT the filter for overlap add multiplies below
+        DSPSplitComplex filterSplit;
+        filterSplit.realp = new float[N/2];
+        filterSplit.imagp = new float[N/2];
+        vDSP_ctoz((DSPComplex *)hpf, 2, &filterSplit, 1, N/2);
+        vDSP_fft_zrip(setup, &filterSplit, 1, log2n, FFT_FORWARD);
+        
+        // need the holdingBuffer long enough for fake linear convolution
+        float* holdingBuffer;
+        holdingBuffer = new float[(N+FILTER_LENGTH)/2];
+        float* overlap;
+        overlap = new float[FILTER_LENGTH/2];
+         
         [self.audioManager setOutputBlock:^(float *outData,
                                             UInt32 numFrames,
                                             UInt32 numChannels) {
             
-            
-            // copy 512 time domain samples to output buffer
+            // copy the last written block into the output buffer (doing stereo here)
             wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
             
             for (int iChannel = 0; iChannel<numChannels; iChannel++){
-                
-//                vDSP_vmul(outData, 1, myWindow, 1, outData + iChannel, 1, N);
-//                for (int i=0; i<N; i++){
-//                    (outData + iChannel)[i] *= myWindow[i];
-//                }
                 
                 // get it into packed format for fft
                 vDSP_ctoz((DSPComplex *) (outData + iChannel), 2, &zSplit, 1, N/2);
@@ -200,35 +204,33 @@
                 vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_FORWARD);
                 
                 
-                
-                for(int i=0; i<N/2; i++){
-                    
-                    mag[i] = sqrtf(zSplit.realp[i]*zSplit.realp[i] + zSplit.imagp[i]*zSplit.imagp[i]);
-                    phase[i] = atan2f(zSplit.imagp[i], zSplit.realp[i]);
-                     
-                }
-                
-                
-                float* zReal = zSplit.realp;
-                float* zImag = zSplit.imagp;
-                
-                for(int i=0; i<N/2; i++){
-                    *zReal++ = mag[i]*cosf(phase[i]);
-                    *zImag++ = mag[i]*sinf(phase[i]);
-                }
-                
+                // go polar then back just as an exercise
+             
+//                for(int i=0; i<N/2; i++){
+//                    mag[i] = sqrtf(zSplit.realp[i]*zSplit.realp[i] + zSplit.imagp[i]*zSplit.imagp[i]);
+//                    phase[i] = atan2f(zSplit.imagp[i], zSplit.realp[i]);
+//                }
+//                float* zReal = zSplit.realp;
+//                float* zImag = zSplit.imagp;
+//                for(int i=0; i<N/2; i++){
+//                    *zReal++ = mag[i]*cosf(phase[i]);
+//                    *zImag++ = mag[i]*sinf(phase[i]);
+//                }
+             
                 
                 // calculate the ifft. leaves it in packed format.
                 vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_INVERSE);
                 
                 // unpack it into a real vector
-                vDSP_ztoc(&zSplit, 1, (DSPComplex *) (outData + iChannel), 2, N/2);
+                vDSP_ztoc(&zSplit, 1, (DSPComplex *) (outData+iChannel), 2, N/2);
                 
                 // scale the result
                 float scale = 0.5/N;
-                vDSP_vsmul(outData + iChannel, 1, &scale, outData + iChannel, 1, N);
+                vDSP_vsmul(outData+iChannel, 1, &scale, outData + iChannel, 1, N);
+
 
             }
+            
             
         }];
         

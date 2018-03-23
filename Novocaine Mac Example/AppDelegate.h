@@ -26,7 +26,7 @@
 #import "RingBuffer.h"
 #import "AudioFileReader.h"
 #import "AudioFileWriter.h"
-
+#import "filterCoeffs.h"
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 
 @property (nonatomic, strong) Novocaine *audioManager;

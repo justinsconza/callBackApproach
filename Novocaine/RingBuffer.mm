@@ -254,15 +254,11 @@ void RingBuffer::FetchFreshData(float *outData, SInt64 numFrames, SInt64 whichCh
 void RingBuffer::SeekWriteHeadPosition(SInt64 offset, int iChannel)
 {
     atomic_set(&mLastWrittenIndex[iChannel], (mLastWrittenIndex[iChannel] + offset) % (mSizeOfBuffer));
-    if(offset==0.0)
-        printf("mLastWrittenIndex:\t%lld\n",mLastWrittenIndex[0]);
 }
 
 void RingBuffer::SeekReadHeadPosition(SInt64 offset, int iChannel)
 {
     atomic_set(&mLastReadIndex[iChannel], (mLastReadIndex[iChannel] + offset) % (mSizeOfBuffer));
-    if(offset==0.0)
-        printf("mLastReadIndex:\t%lld\n",mLastReadIndex[0]);
 }
 
 
