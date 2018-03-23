@@ -43,14 +43,17 @@
     
     __weak AppDelegate * wself = self;
     
+    typedef NS_ENUM(NSUInteger,DspAlgorithm) {
+        basic,
+        delay,
+        fftIfft
+    };
     
     
+    DspAlgorithm myDspAlgorithm = fftIfft;
     
-    
-    
-    int basic = 0;
-    
-    if (basic) {
+    // ------------------ BASIC THROUGHPUT --------------------------- //
+    if (myDspAlgorithm == basic) {
         // Basic playthru example
         [self.audioManager setInputBlock:^(float *data,
                                            UInt32 numFrames,
@@ -66,7 +69,9 @@
             wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
         }];
     }
-    else {
+    
+    // ------------------ SLAPBACK DELAY ----------------------------- //
+    if (myDspAlgorithm == delay) {
         
         // A simple delay that's hard to express without ring buffers
         // numFrames is 512 and numChannels is 2
@@ -138,6 +143,39 @@
             vDSP_vadd(holdingBuffer, 1, outData, 1, outData, 1, numFrames*numChannels);
             
         }];
+    }
+    // ------------------ FFT TO IFFT -------------------------------- //
+    if (myDspAlgorithm == fftIfft) {
+        
+        [self.audioManager setInputBlock:^(float *data,
+                                           UInt32 numFrames,
+                                           UInt32 numChannels) {
+            float volume = 0.5;
+            vDSP_vsmul(data, 1, &volume, data, 1, numFrames*numChannels);
+            wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
+        }];
+        
+        // two FFT block
+        float *holdingBuffer = (float *)calloc(2*numFrames, sizeof(float));
+        
+        // setup the twiddle factor stuff...
+        
+        [self.audioManager setOutputBlock:^(float *outData,
+                                            UInt32 numFrames,
+                                            UInt32 numChannels) {
+            
+            
+            // get 1024 time samples
+            wself.ringBuffer->FetchInterleavedData(holdingBuffer, 2*numFrames, numChannels);
+            
+            // FFT the 1024 time samples
+            
+            // IFFT and scale the FFT-ed samples
+            
+            // ready for playback
+            wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
+        }];
+        
     }
  
     // AUDIO FILE READING COOL!
