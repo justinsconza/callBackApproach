@@ -39,7 +39,7 @@
     self.audioManager = [Novocaine audioManager];
     
 //    self.ringBuffer = new RingBuffer(64*512, 2);
-    self.ringBuffer = new RingBuffer(128*512, 2);
+    self.ringBuffer = new RingBuffer(16*512, 2);
     
     __weak AppDelegate * wself = self;
     
@@ -157,8 +157,8 @@
             wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
         }];
         
-        int N = 512;
-        int log2n = 9;    // 2^9 = 512
+        int N = 1024;
+        int log2n = 10;    // 2^9 = 512
         
         DSPSplitComplex zSplit;
         zSplit.realp = new float[N/2];
@@ -169,19 +169,29 @@
         mag = new float[N/2];
         phase = new float[N/2];
         
+    
+        float* myWindow;
+        myWindow = new float[N];
+        vDSP_hann_window(myWindow, N, vDSP_HANN_DENORM);
         
+
         // prepare the fft algo (you want to reuse the setup across fft calculations)
         FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
-        
+    
         [self.audioManager setOutputBlock:^(float *outData,
                                             UInt32 numFrames,
                                             UInt32 numChannels) {
             
             
-            // copy the data to the packed complex array that the fft algo uses
+            // copy 512 time domain samples to output buffer
             wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
             
             for (int iChannel = 0; iChannel<numChannels; iChannel++){
+                
+//                vDSP_vmul(outData, 1, myWindow, 1, outData + iChannel, 1, N);
+//                for (int i=0; i<N; i++){
+//                    (outData + iChannel)[i] *= myWindow[i];
+//                }
                 
                 // get it into packed format for fft
                 vDSP_ctoz((DSPComplex *) (outData + iChannel), 2, &zSplit, 1, N/2);
@@ -192,8 +202,10 @@
                 
                 
                 for(int i=0; i<N/2; i++){
+                    
                     mag[i] = sqrtf(zSplit.realp[i]*zSplit.realp[i] + zSplit.imagp[i]*zSplit.imagp[i]);
                     phase[i] = atan2f(zSplit.imagp[i], zSplit.realp[i]);
+                     
                 }
                 
                 
@@ -215,6 +227,7 @@
                 // scale the result
                 float scale = 0.5/N;
                 vDSP_vsmul(outData + iChannel, 1, &scale, outData + iChannel, 1, N);
+
             }
             
         }];
