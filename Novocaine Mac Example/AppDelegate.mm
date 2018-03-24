@@ -38,8 +38,9 @@
     
     self.audioManager = [Novocaine audioManager];
     
+    int ringBufferLength = 64*512;
 //    self.ringBuffer = new RingBuffer(64*512, 2);
-    self.ringBuffer = new RingBuffer(16*512, 2);
+    self.ringBuffer = new RingBuffer(ringBufferLength, 2);
     
     __weak AppDelegate * wself = self;
     
@@ -152,49 +153,69 @@
         [self.audioManager setInputBlock:^(float *data,
                                            UInt32 numFrames,
                                            UInt32 numChannels) {
+            
             float volume = 0.5;
             vDSP_vsmul(data, 1, &volume, data, 1, numFrames*numChannels);
             wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
+            
         }];
         
-        int N = 512;
-        int log2n = 9;    // 2^9 = 512
+        int N = 2*512;
+        int log2n = 10;    // 2^10 = 2*512
         
         DSPSplitComplex zSplit;
         zSplit.realp = new float[N/2];
         zSplit.imagp = new float[N/2];
-
-        float* mag;
-        float* phase;
-        mag = new float[N/2];
-        phase = new float[N/2];
-        
-        float* myWindow;
-        myWindow = new float[N];
-        vDSP_hann_window(myWindow, N, vDSP_HANN_DENORM);
         
         FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
         
-        // FFT the filter for overlap add multiplies below
+        // FFT-ed filter for overlap save (need 2*512 length)
+        // b/c of compact form, twice as long is confusingly one N
+        // https://stackoverflow.com/questions/2929401/dsp-filtering-in-the-frequency-domain-via-fft
         DSPSplitComplex filterSplit;
-        filterSplit.realp = new float[N/2];
-        filterSplit.imagp = new float[N/2];
-        vDSP_ctoz((DSPComplex *)hpf, 2, &filterSplit, 1, N/2);
+        filterSplit.realp = new float[N];
+        filterSplit.imagp = new float[N];
+        vDSP_ctoz((DSPComplex *)filterCoeffs, 2, &filterSplit, 1, N);
         vDSP_fft_zrip(setup, &filterSplit, 1, log2n, FFT_FORWARD);
         
-        // need the holdingBuffer long enough for fake linear convolution
-        float* holdingBuffer;
-        holdingBuffer = new float[(N+FILTER_LENGTH)/2];
-        float* overlap;
-        overlap = new float[FILTER_LENGTH/2];
-         
+        // doing overlap save, need to grab 1024 time samples each go round
+        float** holdingBufferLR;
+        holdingBufferLR = (float**)malloc(2*sizeof(float*));
+        holdingBufferLR[0] = (float*)malloc(N*sizeof(float));
+        holdingBufferLR[1] = (float*)malloc(N*sizeof(float));
+    
+        // these 1024 samples get compacted into 512 length thing of reals and imaginaries
+        DSPSplitComplex holdingBufferSplit;
+        holdingBufferSplit.realp = new float[N];
+        holdingBufferSplit.imagp = new float[N];
+        
         [self.audioManager setOutputBlock:^(float *outData,
                                             UInt32 numFrames,
                                             UInt32 numChannels) {
+
+            printf("offset: %lld\n",wself.ringBuffer->NumUnreadFrames());
+            // bring write head back to beginning of where we're just about to grab two blocks from
+
+            wself.ringBuffer->SeekWriteHeadPosition(-wself.ringBuffer->NumUnreadFrames());
+
+            // read the two blocks (this moves the read head forward two blocks)
+            wself.ringBuffer->FetchInterleavedData(*holdingBufferLR, numFrames, numChannels);
             
-            // copy the last written block into the output buffer (doing stereo here)
+            for(int i=0; i<numFrames; i++){
+                *holdingBufferLR[0] = *holdingBufferLR[1] = 0.0;
+            }
+            
+            // write the two blocks just grabbed into the same place they came from
+            // (this moves the write head forward two blocks. so now write head and read head are at same spot)
+            wself.ringBuffer->AddNewInterleavedFloatData(*holdingBufferLR, numFrames, numChannels);
+            
+            // bring read head back to where it was before reading out last two blocks above
+            wself.ringBuffer->SeekReadHeadPosition(-numFrames);
+            
+            // read these to the output buffer
             wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
             
+            /*
             for (int iChannel = 0; iChannel<numChannels; iChannel++){
                 
                 // get it into packed format for fft
@@ -202,20 +223,6 @@
                 
                 // calculate the fft
                 vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_FORWARD);
-                
-                
-                // go polar then back just as an exercise
-             
-//                for(int i=0; i<N/2; i++){
-//                    mag[i] = sqrtf(zSplit.realp[i]*zSplit.realp[i] + zSplit.imagp[i]*zSplit.imagp[i]);
-//                    phase[i] = atan2f(zSplit.imagp[i], zSplit.realp[i]);
-//                }
-//                float* zReal = zSplit.realp;
-//                float* zImag = zSplit.imagp;
-//                for(int i=0; i<N/2; i++){
-//                    *zReal++ = mag[i]*cosf(phase[i]);
-//                    *zImag++ = mag[i]*sinf(phase[i]);
-//                }
              
                 
                 // calculate the ifft. leaves it in packed format.
@@ -227,10 +234,8 @@
                 // scale the result
                 float scale = 0.5/N;
                 vDSP_vsmul(outData+iChannel, 1, &scale, outData + iChannel, 1, N);
-
-
             }
-            
+            */
             
         }];
         

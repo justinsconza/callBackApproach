@@ -50,7 +50,6 @@ mSizeOfBuffer(bufferLength)
 		mLastReadIndex[i] = 0;
         mNumUnreadFrames[i] = 0;
 	}
-		
 }
 
 RingBuffer::~RingBuffer() 
