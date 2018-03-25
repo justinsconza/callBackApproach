@@ -28,8 +28,11 @@
 
 - (void)dealloc
 {
-    if (_ringBuffer){
-        delete _ringBuffer;
+    if (_ringBufferIn){
+        delete _ringBufferIn;
+    }
+    if (_ringBufferOut){
+        delete _ringBufferOut;
     }
 }
 
@@ -39,256 +42,309 @@
     self.audioManager = [Novocaine audioManager];
     
     int ringBufferLength = 64*512;
-//    self.ringBuffer = new RingBuffer(64*512, 2);
-    self.ringBuffer = new RingBuffer(ringBufferLength, 2);
+    self.ringBufferIn = new RingBuffer(ringBufferLength, 2);
+    self.ringBufferOut = new RingBuffer(ringBufferLength, 2);
+    self.ringBufferBetween = new RingBuffer(4*512, 2);
     
     __weak AppDelegate * wself = self;
-    
-    typedef NS_ENUM(NSUInteger,DspAlgorithm) {
-        basic,
-        delay,
-        fftIfft
-    };
-    
-    
-    DspAlgorithm myDspAlgorithm = fftIfft;
-    
-    // --------------------------------------------------------------- //
-    // ------------------ BASIC THROUGHPUT --------------------------- //
-    // --------------------------------------------------------------- //
-    if (myDspAlgorithm == basic) {
-        // Basic playthru example
-        [self.audioManager setInputBlock:^(float *data,
-                                           UInt32 numFrames,
-                                           UInt32 numChannels) {
-            float volume = 0.5;
-            vDSP_vsmul(data, 1, &volume, data, 1, numFrames*numChannels);
-            wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
-        }];
-
-        [self.audioManager setOutputBlock:^(float *outData,
-                                            UInt32 numFrames,
-                                            UInt32 numChannels) {
-            wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
-        }];
-    }
-    
-    // --------------------------------------------------------------- //
-    // ------------------ SLAPBACK DELAY ----------------------------- //
-    // --------------------------------------------------------------- //
-    
-    if (myDspAlgorithm == delay) {
-        
-        // A simple delay that's hard to express without ring buffers
-        // numFrames is 512 and numChannels is 2
-        // data points to the input buffer used by the input callback
-        [self.audioManager setInputBlock:^(float *data, UInt32 numFrames, UInt32 numChannels) {
-            
-            // AddNewInterleavedFloatData moves data from input buffer called data to the ringBuffer
-            wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
-            
-        }];
-    
-        int echoDelay = 11025;
-        float *holdingBuffer = (float *)calloc(16384, sizeof(float));
-    
-        // outData points to the output buffer used by the render callback
-        [self.audioManager setOutputBlock:^(float *outData, UInt32 numFrames, UInt32 numChannels) {
-            
-            // would like to know how separated these heads actually are
-            // put a printf in call to add new data and print mNumUnreadFrames[0] with %lld
-            
-            /*
-            step 1: grab a block of 512 samples starting from current idx in ring buffer.
-                    put this block into the output buffer.
-            */
-            
-            // this wasn't calling with numChannels, so had to add that.  CRITICAL!
-            // FetchInterleaveData moves data from ringBuffer to output buffer called outData
-            wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
-            
-            float volume = 0.8;
-            vDSP_vsmul(outData, 1, &volume, outData, 1, numFrames*numChannels);
-        
-            /*
-            step 2: go back from last written index by one delay length
-                    and one block length (512) and place the read head there
-            */
-            for (int i=0; i<numChannels; i++){
-                wself.ringBuffer->SeekReadHeadPosition(-echoDelay-numFrames, i);
-                
-            }
-            
-            /*
-            step 3: grab a block of 512 samples starting where read head was just placed.
-                    put this block into the holding buffer.
-            */
-            wself.ringBuffer->FetchInterleavedData(holdingBuffer, numFrames, numChannels);
-            
-            /*
-            step 4: the last written index is now one delay length behind
-                    the idx we started step 1 with. so move the read head
-                    to one position ahead of where we started out in the beginning of step 1
-            */
-            for (int i=0; i<numChannels; i++){
-                wself.ringBuffer->SeekReadHeadPosition(echoDelay,i);
-            }
-            
-            // turn down the holding buffer samples by 1/2
-            volume = 0.5;
-            vDSP_vsmul(holdingBuffer, 1, &volume, holdingBuffer, 1, numFrames*numChannels);
-            
-            // add the holding buffer block to the output block.  this will get picked up by the renderCallback and played out by the speakers.
-            vDSP_vadd(holdingBuffer, 1, outData, 1, outData, 1, numFrames*numChannels);
-            
-        }];
-    }
-    
-    // --------------------------------------------------------------- //
-    // ------------------ FFT TO IFFT -------------------------------- //
-    // --------------------------------------------------------------- //
-    
-    if (myDspAlgorithm == fftIfft) {
-        
-        [self.audioManager setInputBlock:^(float *data,
-                                           UInt32 numFrames,
-                                           UInt32 numChannels) {
-            
-            float volume = 0.5;
-            vDSP_vsmul(data, 1, &volume, data, 1, numFrames*numChannels);
-            wself.ringBuffer->AddNewInterleavedFloatData(data, numFrames, numChannels);
-            
-        }];
-        
-        int N = 2*512;
-        int log2n = 10;    // 2^10 = 2*512
-        
-        DSPSplitComplex zSplit;
-        zSplit.realp = new float[N/2];
-        zSplit.imagp = new float[N/2];
-        
-        FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
-        
-        // FFT-ed filter for overlap save (need 2*512 length)
-        // b/c of compact form, twice as long is confusingly one N
-        // https://stackoverflow.com/questions/2929401/dsp-filtering-in-the-frequency-domain-via-fft
-        DSPSplitComplex filterSplit;
-        filterSplit.realp = new float[N];
-        filterSplit.imagp = new float[N];
-        vDSP_ctoz((DSPComplex *)filterCoeffs, 2, &filterSplit, 1, N);
-        vDSP_fft_zrip(setup, &filterSplit, 1, log2n, FFT_FORWARD);
-        
-        // doing overlap save, need to grab 1024 time samples each go round
-        float** holdingBufferLR;
-        holdingBufferLR = (float**)malloc(2*sizeof(float*));
-        holdingBufferLR[0] = (float*)malloc(N*sizeof(float));
-        holdingBufferLR[1] = (float*)malloc(N*sizeof(float));
-    
-        // these 1024 samples get compacted into 512 length thing of reals and imaginaries
-        DSPSplitComplex holdingBufferSplit;
-        holdingBufferSplit.realp = new float[N];
-        holdingBufferSplit.imagp = new float[N];
-        
-        [self.audioManager setOutputBlock:^(float *outData,
-                                            UInt32 numFrames,
-                                            UInt32 numChannels) {
-
-            printf("offset: %lld\n",wself.ringBuffer->NumUnreadFrames());
-            // bring write head back to beginning of where we're just about to grab two blocks from
-
-            wself.ringBuffer->SeekWriteHeadPosition(-wself.ringBuffer->NumUnreadFrames());
-
-            // read the two blocks (this moves the read head forward two blocks)
-            wself.ringBuffer->FetchInterleavedData(*holdingBufferLR, numFrames, numChannels);
-            
-            for(int i=0; i<numFrames; i++){
-                *holdingBufferLR[0] = *holdingBufferLR[1] = 0.0;
-            }
-            
-            // write the two blocks just grabbed into the same place they came from
-            // (this moves the write head forward two blocks. so now write head and read head are at same spot)
-            wself.ringBuffer->AddNewInterleavedFloatData(*holdingBufferLR, numFrames, numChannels);
-            
-            // bring read head back to where it was before reading out last two blocks above
-            wself.ringBuffer->SeekReadHeadPosition(-numFrames);
-            
-            // read these to the output buffer
-            wself.ringBuffer->FetchInterleavedData(outData, numFrames, numChannels);
-            
-            /*
-            for (int iChannel = 0; iChannel<numChannels; iChannel++){
-                
-                // get it into packed format for fft
-                vDSP_ctoz((DSPComplex *) (outData + iChannel), 2, &zSplit, 1, N/2);
-                
-                // calculate the fft
-                vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_FORWARD);
-             
-                
-                // calculate the ifft. leaves it in packed format.
-                vDSP_fft_zrip(setup, &zSplit, 1, log2n, FFT_INVERSE);
-                
-                // unpack it into a real vector
-                vDSP_ztoc(&zSplit, 1, (DSPComplex *) (outData+iChannel), 2, N/2);
-                
-                // scale the result
-                float scale = 0.5/N;
-                vDSP_vsmul(outData+iChannel, 1, &scale, outData + iChannel, 1, N);
-            }
-            */
-            
-        }];
-        
-    }
  
-    // AUDIO FILE READING COOL!
-    // ========================================    
-//    NSURL *inputFileURL = [[NSBundle mainBundle] URLForResource:@"TLC" withExtension:@"mp3"];
-//
-//    self.fileReader = [[AudioFileReader alloc]
-//                       initWithAudioFileURL:inputFileURL
-//                       samplingRate:self.audioManager.samplingRate
-//                       numChannels:self.audioManager.numOutputChannels];
-//
-//    self.fileReader.currentTime = 5;
-//    [self.fileReader play];
-//
-//
-//    __block int counter = 0;
-//
-//
-//    [self.audioManager setOutputBlock:^(float *data, UInt32 numFrames, UInt32 numChannels)
-//     {
-//         [wself.fileReader retrieveFreshAudio:data numFrames:numFrames numChannels:numChannels];
-//         counter++;
-//         if (counter % 80 == 0)
-//             NSLog(@"Time: %f", wself.fileReader.currentTime);
-//
-//     }];
+   
+
     
     
-    // AUDIO FILE WRITING YEAH!
-    // ========================================    
-//    NSArray *pathComponents = [NSArray arrayWithObjects:
-//                               [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject], 
-//                               @"My Recording.m4a", 
-//                               nil];
-//    NSURL *outputFileURL = [NSURL fileURLWithPathComponents:pathComponents];
-//
-//    self.fileWriter = [[AudioFileWriter alloc]
-//                       initWithAudioFileURL:outputFileURL 
-//                       samplingRate:self.audioManager.samplingRate
-//                       numChannels:self.audioManager.numInputChannels];
-//    
-//    
-//    __block int counter = 0;
-//    self.audioManager.inputBlock = ^(float *data, UInt32 numFrames, UInt32 numChannels) {
-//        [wself.fileWriter writeNewAudio:data numFrames:numFrames numChannels:numChannels];
-//        counter += 1;
-//        if (counter > 10 * wself.audioManager.samplingRate / numChannels) { // 10 seconds of recording
-//            wself.audioManager.inputBlock = nil;
+    // numFrames is 512, numChannels is 2
+        
+    [self.audioManager setInputBlock:^(float *data,
+                                       UInt32 numFrames,
+                                       UInt32 numChannels) {
+        
+        // 1. stash all input samples into an INPUT ring buffer
+        /*
+        float volume = 0.75;
+        vDSP_vsmul(data, 1, &volume, data, 1, numFrames*numChannels);
+        */
+        wself.ringBufferIn->AddNewInterleavedFloatData(data, numFrames, numChannels);
+        
+    }];
+  
+    
+    // doing FFT's that are twice as long as numFrames == 512
+    
+    int N = 1024;       // 2N is 2*numFrames == 2*512
+    int log2n = 10;     // 2^10 = 1024
+
+    // don't think i need a window but if i do, it should be same length as FFT's == 1024
+    float* myWindow;
+    myWindow = new float[N];
+    vDSP_hann_window(myWindow, N, vDSP_HANN_DENORM);
+    
+    FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
+    
+    // doing overlap save, need to grab 1024 time samples each go round
+    float* holdingBufferIn;
+    holdingBufferIn = (float*)malloc(N*sizeof(float));
+    
+    float* holdingBufferOut;
+    holdingBufferOut = (float*)malloc(N*sizeof(float));
+    
+    // zero out second half of holdingBuffer for fake linear convolution
+    /*
+    for(int i=N/2; i<N; i++){
+        holdingBuffer[i] = 0.0;
+    }
+    */
+    
+    // this is for holding onto 512 input time samples for overlap add remembering each iteration
+    float* scratchBuffer;
+    scratchBuffer = (float*)malloc((N/2)*sizeof(float));
+    
+    // this is for verifying overlap add stuff is continguous across iterations
+    float* scratchBuffer2;
+    scratchBuffer2 = (float*)malloc(N*sizeof(float));
+    
+    // these 1024 samples get compacted into 512 reals and imaginaries
+    DSPSplitComplex holdingBufferSplit;
+    holdingBufferSplit.realp = new float[N/2];
+    holdingBufferSplit.imagp = new float[N/2];
+    
+    // FFT-ed filter for overlap save (need N = 2*512 length)
+    // https://stackoverflow.com/questions/2929401/dsp-filtering-in-the-frequency-domain-via-fft
+        
+    // writeOutput(filterCoeffs, N, 44100);
+    
+    DSPSplitComplex filterSplit;
+    filterSplit.realp = new float[N/2];
+    filterSplit.imagp = new float[N/2];
+    vDSP_ctoz((DSPComplex *)filterCoeffs, 2, &filterSplit, 1, N/2);
+    vDSP_fft_zrip(setup, &filterSplit, 1, log2n, FFT_FORWARD);
+    
+    // sanity check that filter magnitude makes sense
+    /*
+    float* filterMag;
+    filterMag = new float[N];
+    for(int i=0; i<N/2; i++){
+        filterMag[i] = fabsf(filterSplit.realp[i]*filterSplit.realp[i] + filterSplit.imagp[i]*filterSplit.imagp[i]);
+    }
+    // N/2 samples is the positive frequency section of the filter magnitude response plot
+    writeOutput(filterMag, N/2, 44100);
+    */
+    
+    __block int dumpHit = 0;
+    __block int dumpMatch = 10;
+    __block int dumpCount = 1;
+    
+    [self.audioManager setOutputBlock:^(float *outData,
+                                        UInt32 numFrames,
+                                        UInt32 numChannels) {
+        
+        
+        
+        // 2. process the input ring buffer, producing samples for the OUTPUT ring buffer
+        
+        // while the input ring buffer contains enough to run an N==1024 length FFT
+        while(wself.ringBufferIn->NumUnreadFrames() >= N){
+                        
+            // a. run the FFT on the (windowed!) samples at the end of the input ring buffer
+            
+            // 1024 new input samples, first 512 are overlapped with previous iterations last 512
+            // rewind the read head N/2 because reading N and have to overlap each read with previous iteration
+            wself.ringBufferIn->SeekReadHeadPosition(-numFrames);
+            wself.ringBufferIn->FetchData(holdingBufferIn, 2*numFrames, 0, 1);
+            
+            // don't know if i need to window the signal or not...
+            // DO NOT WINDOW
+            /*
+            vDSP_vmul(holdingBufferIn, 1,
+                      myWindow, 1,
+                      holdingBufferIn, 1,
+                      N);
+            */
+            
+            // sanity check that time domain output is correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(holdingBufferIn, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // pack this into format expected by upcoming FFT
+            vDSP_ctoz((DSPComplex*)holdingBufferIn, 2,
+                      &holdingBufferSplit, 1,
+                      N/2);
+       
+            // do the FFT. data is now in holdingBufferSplit (real & imag)
+            vDSP_fft_zrip(setup,
+                          &holdingBufferSplit, 1,
+                          log2n,
+                          FFT_FORWARD);
+            
+            // sanity check that frequency domain signal is correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    for(int i=0; i<N/2; i++){
+//                        scratchBuffer[i] = fabsf(
+//                                                 holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
+//                                                 holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
+//                                                 );
+//                    }
+//                    writeOutput(scratchBuffer, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            
+            // do FFT(x) * FFT(h) with vmul
+//            vDSP_zvmul(&holdingBufferSplit, 1,
+//                       &filterSplit, 1,
+//                       &holdingBufferSplit, 1,
+//                       N/2,
+//                       1);
+            
+            
+            // sanity check that frequency domain product of signal and filter is correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    for(int i=0; i<N/2; i++){
+//                        printf("%f\n",holdingBufferSplit.realp[i]);
+//                        scratchBuffer[i] = fabsf(
+//                                                      holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
+//                                                      holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
+//                                                      );
+//                    }
+//                    writeOutput(scratchBuffer, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            // inverse FFT the product
+            vDSP_fft_zrip(setup,
+                          &holdingBufferSplit, 1,
+                          log2n,
+                          FFT_INVERSE);
+            
+            // unpack the IFFT data
+            vDSP_ztoc(&holdingBufferSplit, 1,
+                      (DSPComplex*)holdingBufferOut, 2,
+                      N/2);
+            
+            // may need to play around with this scaling factor
+            float scale = 0.25/N;
+            vDSP_vsmul(holdingBufferOut, 1,
+                       &scale,
+                       holdingBufferOut, 1,
+                       N);
+            
+            // sanity check that inversed time domain samples are correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(holdingBufferOut, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // at this point, each IFFT is FILTER_LENGTH/2 delayed
+            
+            
+            // de-offset the IFFT'd time domain samples by FILTER_LENGTH/2
+            // OFFSET IS WRONG DON'T DO IT
+            /*
+            for (int i=0; i<N; i++){
+                holdingBufferOut[i] = holdingBufferOut[ (i + FILTER_LENGTH/2) % N ];
+            }
+            */
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(holdingBufferOut, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // do the overlap add
+            // grab 2nd half from last iteration and put it into the scratch buffer
+            // LEARNED OFFSET IS BAD FROM THIS CODE HERE
+            wself.ringBufferBetween->FetchData(scratchBuffer, numFrames, 0, 1);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(scratchBuffer, N/2, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // current 1st half (holdingBufferOut 1st half) + previous 2nd half (scratchBuffer)
+            for(int i=0; i<N/2; i++){
+                scratchBuffer[i] += holdingBufferOut[i];
+            }
+            
+            // put the overlap-add data from the scratch buffer into the output ring buffer
+            wself.ringBufferOut->AddNewFloatData(scratchBuffer, numFrames, 0);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(scratchBuffer, N/2, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            // need to store the 2nd half of current holdingBufferOut for next time
+            for(int i=0; i<N/2; i++){
+                scratchBuffer[i] = holdingBufferOut[i+N/2];
+            }
+            wself.ringBufferBetween->AddNewFloatData(scratchBuffer, numFrames, 0);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(scratchBuffer, N/2, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+        }
+
+        // finally, put the output ring buffer data into the output stream
+        wself.ringBufferOut->FetchInterleavedData(outData, numFrames, numChannels);
+        
+//        if(!dumpHit){
+//            if(dumpCount==dumpMatch) {
+//                dumpHit = 1;
+//                writeOutput(outData, N/2, 44100);
+//            }
+//            else
+//                dumpCount++;
 //        }
-//    };
+        
+        
+    }];
+    
+    
+ 
 
     // START IT UP YO
     [self.audioManager play];

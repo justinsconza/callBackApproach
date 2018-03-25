@@ -27,12 +27,15 @@
 #import "AudioFileReader.h"
 #import "AudioFileWriter.h"
 #import "filterCoeffs.h"
+#import "writeOutput.h"
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 
 @property (nonatomic, strong) Novocaine *audioManager;
 @property (nonatomic, strong) AudioFileReader *fileReader;
 @property (nonatomic, strong) AudioFileWriter *fileWriter;
-@property (nonatomic, assign) RingBuffer * ringBuffer;
+@property (nonatomic, assign) RingBuffer * ringBufferIn;
+@property (nonatomic, assign) RingBuffer * ringBufferOut;
+@property (nonatomic, assign) RingBuffer * ringBufferBetween;
 
 @property (nonatomic, weak) IBOutlet NSWindow *window;
 
