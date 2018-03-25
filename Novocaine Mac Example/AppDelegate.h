@@ -35,7 +35,7 @@
 @property (nonatomic, strong) AudioFileWriter *fileWriter;
 @property (nonatomic, assign) RingBuffer * ringBufferIn;
 @property (nonatomic, assign) RingBuffer * ringBufferOut;
-@property (nonatomic, assign) RingBuffer * ringBufferBetween;
+@property (nonatomic, assign) RingBuffer * ringBufferOverlap;
 
 @property (nonatomic, weak) IBOutlet NSWindow *window;
 

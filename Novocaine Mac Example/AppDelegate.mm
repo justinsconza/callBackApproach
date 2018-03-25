@@ -44,7 +44,7 @@
     int ringBufferLength = 64*512;
     self.ringBufferIn = new RingBuffer(ringBufferLength, 2);
     self.ringBufferOut = new RingBuffer(ringBufferLength, 2);
-    self.ringBufferBetween = new RingBuffer(4*512, 2);
+    self.ringBufferOverlap = new RingBuffer(4*512, 2);
     
     __weak AppDelegate * wself = self;
  
@@ -53,16 +53,16 @@
     __block int dumpMatch = 10;
     __block int dumpCount = 1;
 
-    // doing FFT's that are twice as long as numFrames == 512
+    // doing FFT's that are twice as long as 2*numFrames == 2*512
     
-    int N = 1024;       // 2N is 2*numFrames == 2*512
+    int N = 1024;
     int log2n = 10;     // 2^10 = 1024
     
     // from 1024 containing both channels at once to two arrays of 512 for L and R separate
     float* deInterleavedL;
     float* deInterleavedR;
-    deInterleavedL = new float[N/2];
-    deInterleavedR = new float[N/2];
+    deInterleavedL = new float[N];
+    deInterleavedR = new float[N];
     
     // numFrames is 512, numChannels is 2
         
@@ -78,12 +78,11 @@
         
         for(int i=0; i<numFrames; i++){
             deInterleavedL[i] = data[2*i];
-            deInterleavedR[i] = data[2*i + 1];
+            // deInterleavedR[i] = data[2*i + 1];
         }
         
-        for(int iChannel=0; iChannel<numChannels; iChannel++){
-            wself.ringBufferIn->AddNewFloatData(deInterleavedL, numFrames, iChannel);
-        }
+        wself.ringBufferIn->AddNewFloatData(deInterleavedL, numFrames, 0);
+        // wself.ringBufferIn->AddNewFloatData(deInterleavedR, numFrames, 1);
         
 //         wself.ringBufferIn->AddNewInterleavedFloatData(data, numFrames, numChannels);
         
@@ -103,50 +102,50 @@
     
 
 
-    // don't think i need a window but if i do, it should be same length as FFT's == 1024
+    // don't think i need a window
     float* myWindow;
-    myWindow = new float[N];
-    vDSP_hann_window(myWindow, N, vDSP_HANN_DENORM);
+    myWindow = new float[N/2];
+    vDSP_hann_window(myWindow, N/2, vDSP_HANN_DENORM);
     
     FFTSetup setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
     
     // doing overlap save, need to grab 1024 time samples each go round
-    float* holdingBufferIn;
-    holdingBufferIn = (float*)malloc(N*sizeof(float));
+    float* bufferInL;
+    bufferInL = (float*)malloc(N*sizeof(float));
+    float* bufferInR;
+    bufferInR = (float*)malloc(N*sizeof(float));
     
-    float* holdingBufferOut;
-    holdingBufferOut = (float*)malloc(N*sizeof(float));
+    float* bufferOutL;
+    bufferOutL = (float*)malloc(N*sizeof(float));
+    float* bufferOutR;
+    bufferOutR = (float*)malloc(N*sizeof(float));
     
-    // zero out second half of holdingBuffer for fake linear convolution
-    /*
-    for(int i=N/2; i<N; i++){
-        holdingBuffer[i] = 0.0;
-    }
-    */
     
-    // this is for holding onto 512 input time samples for overlap add remembering each iteration
+    // this is for holding onto overlap portion each iteration
+    float* overlapBuffer;
+    overlapBuffer = (float*)malloc((N/2)*sizeof(float));
+    
+    // generic scratch buffer
     float* scratchBuffer;
-    scratchBuffer = (float*)malloc((N/2)*sizeof(float));
-    
-    // this is for verifying overlap add stuff is continguous across iterations
-    float* scratchBuffer2;
-    scratchBuffer2 = (float*)malloc(N*sizeof(float));
+    scratchBuffer = (float*)malloc(N*sizeof(float));
     
     // these 1024 samples get compacted into 512 reals and imaginaries
     DSPSplitComplex holdingBufferSplit;
     holdingBufferSplit.realp = new float[N/2];
     holdingBufferSplit.imagp = new float[N/2];
     
-    // FFT-ed filter for overlap save (need N = 2*512 length)
+    // FFT-ed filter for overlap save (need N = 1024 length)
     // https://stackoverflow.com/questions/2929401/dsp-filtering-in-the-frequency-domain-via-fft
         
-    // writeOutput(filterCoeffs, N, 44100);
+    // writeOutput(filterCoeffs, PADDED_LENGTH, 44100);
     
     DSPSplitComplex filterSplit;
     filterSplit.realp = new float[N/2];
     filterSplit.imagp = new float[N/2];
     vDSP_ctoz((DSPComplex *)filterCoeffs, 2, &filterSplit, 1, N/2);
     vDSP_fft_zrip(setup, &filterSplit, 1, log2n, FFT_FORWARD);
+    
+    
     
     // sanity check that filter magnitude makes sense
     /*
@@ -168,11 +167,222 @@
                                         UInt32 numChannels) {
         
         
+
+        
+        
+        
+        
+        // 2. process the input ring buffer, producing samples for the OUTPUT ring buffer
+        
+        // while the input ring buffer contains enough to run an N==1024 length FFT
+        while(wself.ringBufferIn->NumUnreadFrames() >= N) {
+                        
+            // a. run the FFT on the (windowed!) samples at the end of the input ring buffer
+            
+            // fetch head is advancing 512 samples each time so it's continguous with itself
+            wself.ringBufferIn->FetchData(bufferInL, numFrames, 0, 1);
+            
+            
+            for(int i=0; i<N; i++) {
+                if(i<N/2);
+//                    bufferInL[i] *= myWindow[i];
+                else
+                    bufferInL[i] = 0.0;
+            }
+            
+            // sanity check that time domain output is correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(bufferInL, 2*numFrames, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // pack this into format expected by upcoming FFT
+            vDSP_ctoz((DSPComplex*)bufferInL, 2,
+                      &holdingBufferSplit, 1,
+                      N/2);
+
+            
+            // do the FFT. data is now in holdingBufferSplit (real & imag)
+            vDSP_fft_zrip(setup,
+                          &holdingBufferSplit, 1,
+                          log2n,
+                          FFT_FORWARD);
+            
+            // sanity check that frequency domain signal is correct
+
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    for(int i=0; i<N/2; i++){
+//                        scratchBuffer[i] = fabsf(
+//                                                 holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
+//                                                 holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
+//                                                 );
+//                    }
+//                    writeOutput(scratchBuffer, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+
+            
+            float preserveSigNyq = holdingBufferSplit.imagp[0];
+            holdingBufferSplit.imagp[0] = 0.0f;
+
+            float preserveFiltNyq = filterSplit.imagp[0];
+            filterSplit.imagp[0] = 0.0f;
+            
+            // do FFT(x) * FFT(h) with vmul
+//            vDSP_zvmul(&holdingBufferSplit, 1,
+//                       &filterSplit, 1,
+//                       &holdingBufferSplit, 1,
+//                       N/2,
+//                       1);
+            
+            holdingBufferSplit.imagp[0] = preserveFiltNyq * preserveSigNyq;
+            filterSplit.imagp[0] = preserveFiltNyq;
+            
+            // sanity check that frequency domain product of signal and filter is correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    for(int i=0; i<N/2; i++){
+//                        scratchBuffer[i] = fabsf(
+//                                                      holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
+//                                                      holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
+//                                                      );
+//                    }
+//                    writeOutput(scratchBuffer, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            // inverse FFT the product
+            vDSP_fft_zrip(setup,
+                          &holdingBufferSplit, 1,
+                          log2n,
+                          FFT_INVERSE);
+            
+            // unpack the IFFT data
+            vDSP_ztoc(&holdingBufferSplit, 1,
+                      (DSPComplex*)bufferOutL, 2,
+                      N/2);
+            
+            // may need to play around with this scaling factor
+            float scale = 0.25/N;
+            vDSP_vsmul(bufferOutL, 1,
+                       &scale,
+                       bufferOutL, 1,
+                       N);
+            
+            // sanity check that inversed time domain samples are correct
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(bufferOutL, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            
+            
+            
+            // at this point, each IFFT is FILTER_LENGTH/2 delayed
+            // de-offset the IFFT'd time domain samples by FILTER_LENGTH/2
+//            for (int i=0; i<N; i++){
+//                bufferOutL[i] = bufferOutL[ (i + FILTER_LENGTH/2) % N ];
+//            }
+            
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(bufferOutL, N, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            
+            
+            
+            
+            
+            
+            // do the overlap add
+            // grab 2nd half from last iteration's output and put it into the overlap buffer
+            wself.ringBufferOverlap->FetchData(overlapBuffer, numFrames, 0, 1);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(overlapBuffer, numFrames, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            
+            // current 1st half output PLUS old 2nd half output
+            for(int i=0; i<numFrames; i++){
+                bufferOutL[i] += overlapBuffer[i];
+            }
+            
+            // put the overlap-add data into the output ring buffer
+            // have to reinterleave it though
+            for(int i=0; i<numFrames; i++){
+                reInterleaved[2*i] = bufferOutL[i];
+                reInterleaved[2*i+1] = bufferOutL[i];
+            }
+            wself.ringBufferOut->AddNewInterleavedFloatData(reInterleaved, numFrames, numChannels);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(bufferOutL, N/2, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+            // need to store the 2nd half of current bufferOutL for next time
+            for(int i=0; i<numFrames; i++){
+                overlapBuffer[i] = bufferOutL[i+N/2];
+            }
+            wself.ringBufferOverlap->AddNewFloatData(overlapBuffer, numFrames, 0);
+            
+//            if(!dumpHit){
+//                if(dumpCount==dumpMatch) {
+//                    dumpHit = 1;
+//                    writeOutput(overlapBuffer, N/2, 44100);
+//                }
+//                else
+//                    dumpCount++;
+//            }
+            
+        }
+        
+        // this block is for testing.
+        // comment all the output related stuff above before uncommenting and running this
+        /*
         // reinterleave it
         wself.ringBufferIn->FetchData(deInterleavedL, numFrames, 0, 1);
         wself.ringBufferIn->FetchData(deInterleavedR, numFrames, 1, 1);
         
-
+        
         
         for(int i=0; i<numFrames; i++){
             reInterleaved[2*i] = deInterleavedL[i];
@@ -189,226 +399,17 @@
         }
         
         wself.ringBufferOut->AddNewInterleavedFloatData(reInterleaved, numFrames, numChannels);
+         */
+        
+        
+        
         wself.ringBufferOut->FetchInterleavedData(outData, numFrames, numChannels);
+         
         
         
         
-        /*
-        // 2. process the input ring buffer, producing samples for the OUTPUT ring buffer
         
-        // while the input ring buffer contains enough to run an N==1024 length FFT
-        while(wself.ringBufferIn->NumUnreadFrames() >= N) {
-                        
-            // a. run the FFT on the (windowed!) samples at the end of the input ring buffer
-            
-            // 1024 new input samples, first 512 are overlapped with previous iterations last 512
-            // rewind the read head N/2 because reading N and have to overlap each read with previous iteration
-            
-            
-
-            for (int iChannel=0; iChannel<numChannels; iChannel++) {
-                
-                
-                
-                wself.ringBufferIn->SeekReadHeadPosition(-numFrames, iChannel);
-                wself.ringBufferIn->FetchData(holdingBufferIn, 2*numFrames, iChannel, 1);
-                
-                // don't know if i need to window the signal or not...
-                // DO NOT WINDOW
-                
-//                 vDSP_vmul(holdingBufferIn, 1,
-//                 myWindow, 1,
-//                 holdingBufferIn, 1,
-//                 N);
-                
-                
-                // sanity check that time domain output is correct
-                
-//                if(!dumpHit){
-//                    if(dumpCount==dumpMatch) {
-//                        dumpHit = 1;
-//                        writeOutput(holdingBufferIn, N, 44100);
-//                    }
-//                    else
-//                        dumpCount++;
-//                }
-                
-                
-                // pack this into format expected by upcoming FFT
-                vDSP_ctoz((DSPComplex*)holdingBufferIn, 2,
-                          &holdingBufferSplit, 1,
-                          N/2);
-                
-                // do the FFT. data is now in holdingBufferSplit (real & imag)
-                vDSP_fft_zrip(setup,
-                              &holdingBufferSplit, 1,
-                              log2n,
-                              FFT_FORWARD);
-                
-                // sanity check that frequency domain signal is correct
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    for(int i=0; i<N/2; i++){
-                //                        scratchBuffer[i] = fabsf(
-                //                                                 holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
-                //                                                 holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
-                //                                                 );
-                //                    }
-                //                    writeOutput(scratchBuffer, N, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                
-                
-                // do FFT(x) * FFT(h) with vmul
-                //            vDSP_zvmul(&holdingBufferSplit, 1,
-                //                       &filterSplit, 1,
-                //                       &holdingBufferSplit, 1,
-                //                       N/2,
-                //                       1);
-                
-                
-                // sanity check that frequency domain product of signal and filter is correct
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    for(int i=0; i<N/2; i++){
-                //                        printf("%f\n",holdingBufferSplit.realp[i]);
-                //                        scratchBuffer[i] = fabsf(
-                //                                                      holdingBufferSplit.realp[i]*holdingBufferSplit.realp[i] +
-                //                                                      holdingBufferSplit.imagp[i]*holdingBufferSplit.imagp[i]
-                //                                                      );
-                //                    }
-                //                    writeOutput(scratchBuffer, N, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                // inverse FFT the product
-                vDSP_fft_zrip(setup,
-                              &holdingBufferSplit, 1,
-                              log2n,
-                              FFT_INVERSE);
-                
-                // unpack the IFFT data
-                vDSP_ztoc(&holdingBufferSplit, 1,
-                          (DSPComplex*)holdingBufferOut, 2,
-                          N/2);
-                
-                // may need to play around with this scaling factor
-                float scale = 0.25/N;
-                vDSP_vsmul(holdingBufferOut, 1,
-                           &scale,
-                           holdingBufferOut, 1,
-                           N);
-                
-                // sanity check that inversed time domain samples are correct
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    writeOutput(holdingBufferOut, N, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                
-                // at this point, each IFFT is FILTER_LENGTH/2 delayed
-                
-                
-                // de-offset the IFFT'd time domain samples by FILTER_LENGTH/2
-                // OFFSET IS WRONG DON'T DO IT
-               
-//                 for (int i=0; i<N; i++){
-//                 holdingBufferOut[i] = holdingBufferOut[ (i + FILTER_LENGTH/2) % N ];
-//                 }
-                
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    writeOutput(holdingBufferOut, N, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                
-                // do the overlap add
-                // grab 2nd half from last iteration and put it into the scratch buffer
-                // LEARNED OFFSET IS BAD FROM THIS CODE HERE
-                wself.ringBufferBetween->FetchData(scratchBuffer, numFrames, iChannel, 1);
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    writeOutput(scratchBuffer, N/2, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                
-                // current 1st half (holdingBufferOut 1st half) + previous 2nd half (scratchBuffer)
-                for(int i=0; i<N/2; i++){
-                    scratchBuffer[i] += holdingBufferOut[i];
-                }
-                
-                // put the overlap-add data from the scratch buffer into the output ring buffer
-                wself.ringBufferOut->AddNewFloatData(scratchBuffer, numFrames, iChannel);
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    writeOutput(scratchBuffer, N/2, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                // need to store the 2nd half of current holdingBufferOut for next time
-                for(int i=0; i<N/2; i++){
-                    scratchBuffer[i] = holdingBufferOut[i+N/2];
-                }
-                wself.ringBufferBetween->AddNewFloatData(scratchBuffer, numFrames, iChannel);
-                
-                //            if(!dumpHit){
-                //                if(dumpCount==dumpMatch) {
-                //                    dumpHit = 1;
-                //                    writeOutput(scratchBuffer, N/2, 44100);
-                //                }
-                //                else
-                //                    dumpCount++;
-                //            }
-                
-                }
-            }
-
-        for(int iChannel = 0; iChannel<numChannels; iChannel++) {
-            
-            // finally, put the output ring buffer data into the output stream
-            wself.ringBufferOut->FetchData(outData, numFrames, iChannel, 1);
-            
-//            if(!dumpHit){
-//                if(dumpCount==dumpMatch) {
-//                    dumpHit = 1;
-//                    writeOutput(outData, N/2, 44100);
-//                }
-//                else
-//                    dumpCount++;
-//            }
-            
-        }
-        */
         
-
         
     }];
     
