@@ -41,7 +41,7 @@
     
     self.audioManager = [Novocaine audioManager];
     
-    int ringBufferLength = 64*512;
+    int ringBufferLength = 32*512;
     self.ringBufferIn = new RingBuffer(ringBufferLength, 2);
     self.ringBufferOut = new RingBuffer(ringBufferLength, 2);
     self.ringBufferOverlap = new RingBuffer(512, 2);
@@ -62,6 +62,9 @@
     float* deInterleavedR;
     deInterleavedL = new float[N];
     deInterleavedR = new float[N];
+    for(int i=0; i<N; i++){
+        deInterleavedL[i] = deInterleavedR[i] = 0.0;
+    }
     
     // numFrames is 512, numChannels is 2
         
@@ -101,22 +104,37 @@
     float* bufferInL;
     bufferInL = (float*)malloc(N*sizeof(float));
     float* bufferInR;
-    bufferInR = (float*)malloc(N*sizeof(float));
+    bufferInL = (float*)malloc(N*sizeof(float));
     
     float* bufferOutL;
     bufferOutL = (float*)malloc(N*sizeof(float));
     float* bufferOutR;
     bufferOutR = (float*)malloc(N*sizeof(float));
     
-    
-    // this is for holding onto overlap portion each iteration
-    float* overlapBuffer;
-    overlapBuffer = (float*)malloc((N/2)*sizeof(float));
-    
     // generic scratch buffer
     float* scratchBuffer;
     scratchBuffer = (float*)malloc(N*sizeof(float));
     
+    // this is for holding onto overlap portion each iteration
+    float* overlapBuffer;
+    overlapBuffer = (float*)malloc((N/2)*sizeof(float));
+
+    // 1024 length
+    float* reInterleaved;
+    reInterleaved = new float[N];
+    
+    for(int i=0; i<N; i++){
+        bufferInL[i] = bufferInL[i] = 0.0;
+        bufferOutL[i] = bufferOutR[i] = 0.0;
+        scratchBuffer[i] = 0.0;
+        reInterleaved[i] = 0.0;
+        if (i<N/2)
+            overlapBuffer[i] = 0.0;
+    }
+    
+    
+
+   
     // these 1024 samples get compacted into 512 reals and imaginaries
     DSPSplitComplex holdingBufferSplit;
     holdingBufferSplit.realp = new float[N/2];
@@ -146,21 +164,23 @@
     writeOutput(filterMag, N/2, 44100);
     */
     
-    // 1024 length
-    float* reInterleaved;
-    reInterleaved = new float[N];
-    
+
+    __block int counter = 10;
+    __block int doneCounting = 0;
     
     [self.audioManager setOutputBlock:^(float *outData,
                                         UInt32 numFrames,
                                         UInt32 numChannels) {
         
+        // need to avoid a pop sound at the beginning
+        if(!doneCounting) {
+            counter -= 1;
+            if(counter == 0)
+                doneCounting = 1;
+        }
         
-
-        
-        
-        
-        
+        if(doneCounting) {
+            
         // 2. process the input ring buffer, producing samples for the OUTPUT ring buffer
         
         // while the input ring buffer contains enough to run an N==1024 length FFT
@@ -172,7 +192,7 @@
             // printf("take from input: %d\n", wself.ringBufferIn->ReadHeadPosition(0));
             wself.ringBufferIn->FetchData(bufferInL, numFrames, 0, 1);
             
-            
+            // DO NOT WINDOW
             for(int i=0; i<N; i++) {
                 if(i<N/2);
 //                     bufferInL[i] *= myWindow[i];
@@ -270,10 +290,9 @@
 //                writeOutput(bufferOutL, N, 44100);
             
             
-            // -------- CORRECT UP TO HERE ----------------------------- //
-            
             // at this point, each IFFT is FILTER_LENGTH/2 delayed
             // de-offset the IFFT'd time domain samples by FILTER_LENGTH/2
+            // DO NOT DE-OFFSET
 //            for (int i=0; i<N; i++){
 //                bufferOutL[i] = bufferOutL[ (i + FILTER_LENGTH/2) % N ];
 //            }
@@ -321,13 +340,20 @@
             
             // --------------------------------------------------------- //
             
+            }
         }
+        
+        
+//         float volume = 1.0;
+//         vDSP_vsmul(outData, 1, &volume, outData, 1, numFrames*numChannels);
+        
         
         wself.ringBufferOut->FetchInterleavedData(outData, numFrames, numChannels);
         
         // this block is for testing.
         // comment all the output related stuff above before uncommenting and running this
         /*
+         
         // reinterleave it
         wself.ringBufferIn->FetchData(deInterleavedL, numFrames, 0, 1);
         wself.ringBufferIn->FetchData(deInterleavedR, numFrames, 1, 1);
