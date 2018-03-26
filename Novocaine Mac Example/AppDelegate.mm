@@ -184,7 +184,7 @@
         // 2. process the input ring buffer, producing samples for the OUTPUT ring buffer
         
         // while the input ring buffer contains enough to run an N==1024 length FFT
-        while(wself.ringBufferIn->NumUnreadFrames() >= N) {
+        while(wself.ringBufferIn->NumUnreadFrames() >= N/2) {
                         
             // a. run the FFT on the (windowed!) samples at the end of the input ring buffer
             
